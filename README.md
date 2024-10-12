@@ -1,5 +1,4 @@
-![banner](.images/Zephyr_color-13.webp#gh-dark-mode-only)
-![banner](.images/STM32F103C8T6_Black_Pill-1.jpg#gh-light-mode-only)
+![banner](.images/banner_amanita_controller.png)
 
 # Amanita Robot Controller Firmware using Zephyr RTOS
 
