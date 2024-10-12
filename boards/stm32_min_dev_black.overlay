@@ -1,0 +1,146 @@
+/*
+ * Copyright (c) 2024 Branilson Luiz
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include <zephyr/dt-bindings/pinctrl/stm32-pinctrl.h>
+#include <zephyr/dt-bindings/sensor/qdec_stm32.h>
+
+/ {
+	chosen {
+		zephyr,console = &cdc_acm_uart0;
+	};
+
+	gpio_outputs {
+		compatible = "gpio-leds";
+		m1_dir_a: m1_dir_a {
+			gpios = <&gpioa 5 GPIO_ACTIVE_HIGH>;
+			label = "M1_DIR_A";
+		};
+		m1_dir_b: m1_dir_b {
+			gpios = <&gpioa 4 GPIO_ACTIVE_HIGH>;
+			label = "M1_DIR_B";
+		};
+		m2_dir_a: m2_dir_a {
+			gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;
+			label = "M2_DIR_A";
+		};
+		m2_dir_b: m2_dir_b {
+			gpios = <&gpiob 1 GPIO_ACTIVE_HIGH>;
+			label = "M2_DIR_B";
+		};
+		motors_stby: motors_stby {
+			gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>;
+			label = "STBY";
+		};
+	};
+
+	gpio_encoders {
+		compatible = "gpio-keys";
+		enc1_a: enc1_a {
+			label = "ENC1_A";
+			gpios = <&gpioa 8 0>;
+		};
+		enc1_b: enc1_b {
+			label = "ENC1_B";
+			gpios = <&gpioa 9 0>;
+		};
+		enc2_a: enc2_a {
+			label = "ENC2_A";
+			gpios = <&gpioa 0 0>;
+		};
+		enc2_b: enc2_b {
+			label = "ENC2_B";
+			gpios = <&gpioa 1 0>;
+		};
+	};
+
+	pwm_motors {
+		compatible = "pwm-leds";
+		pwm_1: pwm_1 {
+			pwms = <&pwm3 1 50000 PWM_POLARITY_NORMAL>; /*channel =1 / period =50000 ns / flags*/
+		};
+		pwm_2: pwm_2 {
+			pwms = <&pwm3 2 50000 PWM_POLARITY_NORMAL>;
+		};
+	};
+
+	aliases {
+		pwm1 = &pwm_1;
+		pwm2 = &pwm_2;
+		led0 = &led;
+		enc1a = &enc1_a;
+		enc1b = &enc1_b;
+		enc2a = &enc2_a;
+		enc2b = &enc2_b;
+		m1fwd = &m1_dir_a;
+		m1bck = &m1_dir_b;
+		m2fwd = &m2_dir_a;
+		m2bck = &m2_dir_b;
+		stby = &motors_stby;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0{
+		compatible = "zephyr,cdc-acm-uart";
+	};
+
+};
+
+&timers3{
+	status = "okay";
+	
+	pwm3: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch1_pwm_out_pa6 &tim3_ch2_pwm_out_pa7>;
+		pinctrl-names = "default";
+	};
+};
+
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_scl_pb10 &i2c2_sda_pb11>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	ina226@40 {
+		status = "okay";
+		compatible = "ti,ina226";
+		reg = <0x40>;
+		rshunt-micro-ohms = <10000>;
+		current-lsb-microamps = <250>;
+	};
+};
+
+&usart1 {
+	status = "disabled";
+};
+
+&usart2 {
+	status = "disabled";
+};
+
+&usart3 {
+	status = "disabled";
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&pwm1 {
+	status = "disabled";
+};
+
+&adc1 {
+	status = "disabled";
+};
+
+&spi1 {
+	status = "disabled";
+};
+
+&spi2 {
+	status = "disabled";
+};
