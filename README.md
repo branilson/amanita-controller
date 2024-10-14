@@ -58,8 +58,8 @@ $ west build -b stm32_min_dev@black --pristine
 ..
 [7/7] Linking C executable zephyr/zephyr.elf
 Memory region         Used Size  Region Size  %age Used
-           FLASH:       64968 B        64 KB     99.13%
-             RAM:       15152 B        20 KB     73.98%
+           FLASH:       65256 B        64 KB     99.57%
+             RAM:       15240 B        20 KB     74.41%
         IDT_LIST:          0 GB        32 KB      0.00%
 Generating files from /home/bl/dev/stm32/amanita-controller/build/zephyr/zephyr.elf for board: stm32_min_dev
 ```

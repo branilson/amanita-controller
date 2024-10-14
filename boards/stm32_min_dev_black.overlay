@@ -8,7 +8,7 @@
 
 / {
 	chosen {
-		zephyr,console = &cdc_acm_uart0;
+		zephyr,console = &usart2; //cdc_acm_uart0
 	};
 
 	gpio_outputs {
@@ -114,10 +114,6 @@
 };
 
 &usart1 {
-	status = "disabled";
-};
-
-&usart2 {
 	status = "disabled";
 };
 

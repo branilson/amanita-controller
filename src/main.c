@@ -14,19 +14,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdbool.h>
+
 #include <sample_usbd.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/sensor.h>
-#include <zephyr/sys/printk.h>
 #include <zephyr/sys/cbprintf.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/console/console.h>
+
 #include "qdenc.h"
 #include "hbridge.h"
 #include "Pid.h"
@@ -43,22 +42,24 @@
 #define KP 0.012F
 #define KI 0.008F
 #define KD 0.004F
+#define MSG_SIZE 32
 enum motors
 {
 	M1 = 0,
 	M2
 };
 
-LOG_MODULE_REGISTER(cdc_acm_echo, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(amanita_controller, LOG_LEVEL_INF);
+
+void blink_led();
+int init_encoder_irqs();
+void print_uart(char *buf);
+void runCommand(char *args);
+void update_motors(struct k_timer *tim);
+static inline void print_baudrate(const struct device *dev);
+void serial_cb(const struct device *dev, void *user_data);
 
 const struct device *const uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
-
-static inline void print_baudrate(const struct device *dev);
-void runCommand(char *args);
-int init_encoder_irqs();
-void blink_led();
-void update_motors(struct k_timer *tim);
-
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec enc1a_spec = GPIO_DT_SPEC_GET_OR(DT_ALIAS(enc1a), gpios, {0});
 static const struct gpio_dt_spec enc1b_spec = GPIO_DT_SPEC_GET_OR(DT_ALIAS(enc1b), gpios, {0});
@@ -76,10 +77,14 @@ static const struct pwm_dt_spec pwm2_dt_spec = PWM_DT_SPEC_GET(DT_ALIAS(pwm2));
 const struct device *const ina_dev = DEVICE_DT_GET_ONE(ti_ina226);
 struct sensor_value v_bus, power, current;
 pidData_t control1, control2;
-bool is_control = false, speed_debug = false;
+static bool is_control = false, speed_debug = false;
 int reverse[] = {-1, 1}; /* -1 to reverse / 1 to direct */
 int pwm_values[2], speeds[2], last_counts[2];
 struct k_timer control_loop;
+static char rx_buf[MSG_SIZE];
+static int rx_buf_pos;
+
+K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 1);
 
 K_THREAD_DEFINE(blink_led_thread, STACK_SIZE, blink_led, NULL, NULL, NULL,
 				7, 0, 0);
@@ -105,14 +110,14 @@ int main(void)
 
 	if (!pwm_is_ready_dt(&pwm1_dt_spec))
 	{
-		printk("Error: PWM device %s is not ready\n",
-			   pwm1_dt_spec.dev->name);
+		LOG_ERR("Error: PWM device %s is not ready\n",
+				pwm1_dt_spec.dev->name);
 	}
 
 	if (!pwm_is_ready_dt(&pwm2_dt_spec))
 	{
-		printk("Error: PWM device %s is not ready\n",
-			   pwm2_dt_spec.dev->name);
+		LOG_ERR("Error: PWM device %s is not ready\n",
+				pwm2_dt_spec.dev->name);
 	}
 
 	if (hbridge_init(&motor1, &pwm1_dt_spec, &m1_forward_spec, &m1_backward_spec,
@@ -129,7 +134,7 @@ int main(void)
 
 	if (!device_is_ready(ina_dev))
 	{
-		printf("Device %s is not ready.\n", ina_dev->name);
+		LOG_ERR("Device %s is not ready.\n", ina_dev->name);
 	}
 
 	init_encoder(&enc1, 1);
@@ -141,6 +146,7 @@ int main(void)
 	Pid_SetOutputLimits(&control2, (double)MIN_PWM, (double)MAX_PWM);
 	k_timer_start(&control_loop, K_MSEC(CONTROL_PERIOD_MSEC), K_MSEC(CONTROL_PERIOD_MSEC));
 
+	LOG_INF("Wait for DTR");
 	while (true)
 	{
 		uint32_t dtr = 0U;
@@ -155,15 +161,35 @@ int main(void)
 			k_sleep(K_MSEC(100)); /* Give CPU resources to low priority threads. */
 		}
 	}
+	LOG_INF("DTR set");
 
-	printk("\n***  BL-Labs Amanita Controller running on %s ***\n\n", CONFIG_BOARD);
-	print_baudrate(uart_dev);
-	printk("\nEnter a command and press enter or h <enter> for help.\n");
-
-	console_getline_init();
-	while (1)
+	ret = uart_irq_callback_user_data_set(uart_dev, serial_cb, NULL);
+	if (ret < 0)
 	{
-		char *argv = console_getline();
+		if (ret == -ENOTSUP)
+		{
+			LOG_ERR("Interrupt-driven UART API support not enabled\n");
+		}
+		else if (ret == -ENOSYS)
+		{
+			LOG_ERR("UART device does not support interrupt-driven API\n");
+		}
+		else
+		{
+			LOG_ERR("Error setting UART callback: %d\n", ret);
+		}
+		return 0;
+	}
+	uart_irq_rx_enable(uart_dev);
+
+	LOG_INF("\n\r***  BL-Labs Amanita Controller running on %s ***\n\n", CONFIG_BOARD);
+	print_baudrate(uart_dev);
+	LOG_INF("\n\rEnter a command and press enter or h <enter> for help.\n");
+
+	char argv[MSG_SIZE];
+
+	while (k_msgq_get(&uart_msgq, &argv, K_FOREVER) == 0)
+	{
 		runCommand(argv);
 	}
 	return 0;
@@ -177,6 +203,7 @@ void runCommand(char *args)
 	char *cmd, *arg1, *arg2, *arg3;
 	cmd = arg1 = arg2 = arg3 = NULL;
 	char *token;
+	char msg[MSG_SIZE];
 
 	while ((token = strtok_r(argv, " ", &argv)))
 	{
@@ -222,82 +249,86 @@ void runCommand(char *args)
 
 	if (!valid)
 	{
-		printk("ERR\n");
+		print_uart("ERR\n");
 		return;
 	}
 
 	switch (cmd[0])
 	{
 	case 'h':
-		printk("\t h <enter> to print this help.\n");
-		printk("\t b <enter> to get baudrate.\n");
-		printk("\t e <enter> to get encoder counts/s.\n");
-		printk("\t r <enter> to reset encoder counts.\n");
-		printk("\t s <enter> to get motor speeds in ticks/s.\n");
-		printk("\t g <enter> to get PID controller gains.\n");
-		printk("\t d <enter> to toggle speed debug flag.\n");
-		printk("\t p <enter> to get power(W), Voltage(V), and Current(A).\n");
-		printk("\t m nn nn <enter> to set control speeds in ticks/s.\n");
-		printk("\t o nn nn <enter> to set pwm speeds.\n");
-		printk("\t u nn nn nn <enter> to update PID gains.\n");
-		printk("\t nn is an integer number.\n");
+		print_uart("\r\t h <enter> to print this help.\r\n");
+		print_uart("\t b <enter> to get baudrate.\r\n");
+		print_uart("\t e <enter> to get encoder counts/s.\r\n");
+		print_uart("\t r <enter> to reset encoder counts.\r\n");
+		print_uart("\t s <enter> to get motor speeds in ticks/s.\r\n");
+		print_uart("\t g <enter> to get PID controller gains.\r\n");
+		print_uart("\t d <enter> to toggle speed debug flag.\r\n");
+		print_uart("\t p <enter> to get power(W), Voltage(V), and Current(A).\r\n");
+		print_uart("\t m nn nn <enter> to set control speeds in ticks/s.\r\n");
+		print_uart("\t o nn nn <enter> to set pwm speeds.\r\n");
+		print_uart("\t u nn nn nn <enter> to update PID gains.\r\n");
+		print_uart("\t nn is an integer number.\r\n");
 		break;
 	case 'b':
 		print_baudrate(uart_dev);
 		break;
 	case 'e':
-		printk("e %lli %lli\n", reverse[M1] * enc1.count, reverse[M2] * enc2.count);
+		snprintf(msg, MSG_SIZE, "e %lli %lli\n", reverse[M1] * enc1.count, reverse[M2] * enc2.count);
 		break;
 	case 'r':
 		init_encoder(&enc1, 1);
 		init_encoder(&enc2, 1);
-		printk("e %lli %lli\n", reverse[M1] * enc1.count, reverse[M2] * enc2.count);
+		snprintf(msg, MSG_SIZE, "e %lli %lli\n", reverse[M1] * enc1.count, reverse[M2] * enc2.count);
 		break;
 	case 's':
-		printk("s %i %i\n", speeds[M1], speeds[M2]);
+		snprintf(msg, MSG_SIZE, "s %i %i\n", speeds[M1], speeds[M2]);
+		print_uart(msg);
 		break;
 	case 'd':
 		speed_debug = !speed_debug;
-		if (!speed_debug)
-			printk("Speed debug disabled\n");
+		if (speed_debug)
+			snprintf(msg, MSG_SIZE, "DBG\n");
+		else
+			snprintf(msg, MSG_SIZE, "NDBG\n");
 		break;
 	case 'g':
-		printk("g1 %f %f %f\n", Pid_GetKp(&control1), Pid_GetKi(&control1), Pid_GetKd(&control1));
-		printk("g2 %f %f %f\n", Pid_GetKp(&control2), Pid_GetKi(&control2), Pid_GetKd(&control2));
+		snprintf(msg, MSG_SIZE, "g1 %f %f %f\n", Pid_GetKp(&control1), Pid_GetKi(&control1), Pid_GetKd(&control1));
 		break;
 	case 'm':
 		int m1 = atoi(arg1), m2 = atoi(arg2);
 		Pid_SetSetPoint(&control1, m1);
 		Pid_SetSetPoint(&control2, m2);
 		is_control = true;
-		printk("m %i %i\n", m1, m2);
+		snprintf(msg, MSG_SIZE, "m %i %i\n", m1, m2);
 		break;
 	case 'o':
 		int o1 = atoi(arg1), o2 = atoi(arg2);
 		pwm_values[M1] = o1;
 		pwm_values[M2] = o2;
-		printk("o %i %i\n", o1, o2);
+		snprintf(msg, MSG_SIZE, "o %i %i\n", o1, o2);
 		is_control = false;
 		break;
 	case 'p':
-		if (sensor_sample_fetch(ina_dev)) printk("Could not fetch sensor data.\n");
+		if (sensor_sample_fetch(ina_dev))
+			LOG_ERR("Could not fetch sensor data.\n");
 		sensor_channel_get(ina_dev, SENSOR_CHAN_VOLTAGE, &v_bus);
 		sensor_channel_get(ina_dev, SENSOR_CHAN_POWER, &power);
 		sensor_channel_get(ina_dev, SENSOR_CHAN_CURRENT, &current);
-		printf("p %f %f %f\n", sensor_value_to_double(&v_bus),
-			   sensor_value_to_double(&power),
-			   sensor_value_to_double(&current));
+		snprintf(msg, MSG_SIZE, "p %f %f %f\n", sensor_value_to_double(&v_bus),
+				 sensor_value_to_double(&power),
+				 sensor_value_to_double(&current));
 		break;
 	case 'u':
 		double kp = atof(arg1), ki = atof(arg2), kd = atof(arg3);
 		Pid_SetTunings(&control1, kp, ki, kd);
 		Pid_SetTunings(&control2, kp, ki, kd);
-		printk("u %f %f %f\n", kp, ki, kd);
+		snprintf(msg, MSG_SIZE, "u %f %f %f\n", kp, ki, kd);
 		break;
 	default:
-		printk("Invalid Command\r\n"); /* It shall never gets here. */
+		print_uart("INV\n"); /* It shall never gets here. */
 		break;
 	}
+	print_uart(msg);
 }
 
 static inline void print_baudrate(const struct device *dev)
@@ -318,13 +349,16 @@ static inline void print_baudrate(const struct device *dev)
 
 void update_motors(struct k_timer *tim)
 {
+	char msg[MSG_SIZE];
 	speeds[M1] = reverse[M1] * (enc1.count - last_counts[M1]) * HZ; /* speeds in ticks/sec */
 	speeds[M2] = reverse[M2] * (enc2.count - last_counts[M2]) * HZ;
 	last_counts[M1] = enc1.count;
 	last_counts[M2] = enc2.count;
 	if (speed_debug)
-		printk("s %i %i\n", speeds[M1], speeds[M2]);
-
+	{
+		snprintf(msg, MSG_SIZE, "s %i %i\n", speeds[M1], speeds[M2]);
+		print_uart(msg);
+	}
 	if (is_control)
 	{
 		Pid_Run(&control1, (float)speeds[M1]);
@@ -406,4 +440,50 @@ int init_encoder_irqs()
 	ret += gpio_add_callback(enc2a_spec.port, &enc2a_cb);
 	ret += gpio_add_callback(enc2b_spec.port, &enc2b_cb);
 	return ret;
+}
+
+void print_uart(char *buf)
+{
+	int msg_len = strlen(buf);
+
+	for (int i = 0; i < msg_len; i++)
+	{
+		uart_poll_out(uart_dev, buf[i]);
+	}
+}
+
+void serial_cb(const struct device *dev, void *user_data)
+{
+	uint8_t c;
+
+	if (!uart_irq_update(uart_dev))
+	{
+		return;
+	}
+
+	if (!uart_irq_rx_ready(uart_dev))
+	{
+		return;
+	}
+
+	/* read until FIFO empty */
+	while (uart_fifo_read(uart_dev, &c, 1) == 1)
+	{
+		if ((c == '\n' || c == '\r') && rx_buf_pos > 0)
+		{
+			/* terminate string */
+			rx_buf[rx_buf_pos] = '\0';
+
+			/* if queue is full, message is silently dropped */
+			k_msgq_put(&uart_msgq, &rx_buf, K_NO_WAIT);
+
+			/* reset the buffer (it was copied to the msgq) */
+			rx_buf_pos = 0;
+		}
+		else if (rx_buf_pos < (sizeof(rx_buf) - 1))
+		{
+			rx_buf[rx_buf_pos++] = c;
+		}
+		/* else: characters beyond buffer size are dropped */
+	}
 }
